@@ -1,0 +1,12 @@
+.git
+node_modules
+dist
+tsp-output
+test-results
+.playwright
+e2e
+backend/vendor
+backend/var
+backend/.env.local
+**/.DS_Store
+.idea

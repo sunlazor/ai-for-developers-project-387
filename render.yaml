@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: calendai
+    runtime: docker
+    plan: free
+    region: oregon
+    branch: main
+    autoDeploy: true
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    envVars:
+      - key: APP_ENV
+        value: prod
+      - key: APP_DEBUG
+        value: 0
+      - key: PORT
+        value: 8080
+      - key: LOAD_FIXTURES
+        value: skip
