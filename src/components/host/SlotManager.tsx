@@ -23,6 +23,7 @@ interface SlotManagerProps {
 }
 
 const WEEK_COUNT = 5
+const HOURS = Array.from({length: 24}, (_, i) => i)
 
 function useCurrentWeek() {
     const [weekOffset, setWeekOffset] = useState(0)
@@ -42,7 +43,6 @@ function useCurrentWeek() {
 export function SlotManager({token}: SlotManagerProps) {
     const queryClient = useQueryClient()
     const {days, weekOffset, allMondays, setWeekOffset} = useCurrentWeek()
-
     const [selectedDay, setSelectedDay] = useState<Date | null>(days[0])
 
     const hostSlots = useQuery({
@@ -82,34 +82,27 @@ export function SlotManager({token}: SlotManagerProps) {
         if (!selectedDay) return []
         const dayKey = selectedDay.toISOString().slice(0, 10)
         const realSlots = slotsByDay.get(dayKey) ?? []
-
         const dayStart = new Date(selectedDay)
         dayStart.setUTCHours(0, 0, 0, 0)
         const dayEnd = new Date(selectedDay)
         dayEnd.setUTCHours(23, 45, 0, 0)
-
         const allStarts = generateSlotStarts(dayStart, dayEnd)
         const realLookup = new Map(realSlots.map(s => [s.start, s]))
-
         return allStarts.map(start =>
             realLookup.get(start) ?? {start, state: 'unavailable' as const},
         )
     }, [selectedDay, slotsByDay])
 
-    const slotsByBand = useMemo(() => {
-        const bands = new Map<TimeBand, { start: string; state: string }[]>()
-        for (const band of TIME_BAND_ORDER) bands.set(band, [])
-        for (const slot of slotsForSelectedDay) {
-            const hour = new Date(slot.start).getUTCHours()
-            const band = getTimeBand(hour)
-            bands.get(band)!.push(slot)
-        }
-        return bands
+    const hourRows = useMemo(() => {
+        return HOURS.map(hour => {
+            const slots = slotsForSelectedDay.filter(s => new Date(s.start).getUTCHours() === hour)
+            return {hour, slots, band: slots.length > 0 ? getTimeBand(hour) : null}
+        }).filter(r => r.band !== null) as { hour: number; slots: { start: string; state: string }[]; band: TimeBand }[]
     }, [slotsForSelectedDay])
 
     const openCount = useMemo(
-        () => hostSlots.data?.filter(s => s.state === 'available').length ?? 0,
-        [hostSlots.data],
+        () => slotsForSelectedDay.filter(s => s.state === 'available').length,
+        [slotsForSelectedDay],
     )
 
     function toggleSlot(slot: { start: string; state: string }) {
@@ -123,6 +116,19 @@ export function SlotManager({token}: SlotManagerProps) {
         }
         const targetState = slot.state === 'available' ? 'unavailable' : 'available'
         editAvailability.mutate([{start: slot.start, state: targetState}])
+    }
+
+    function toggleBand(band: TimeBand, targetState: 'available' | 'unavailable') {
+        const edits = hourRows
+            .filter(r => r.band === band)
+            .flatMap(r => r.slots)
+            .filter(s => s.state !== 'booked' && s.state !== targetState)
+            .map(s => ({start: s.start, state: targetState}))
+        if (edits.length === 0) {
+            toast({title: `All ${timeBandLabel(band).toLowerCase()} slots already ${targetState}`})
+            return
+        }
+        editAvailability.mutate(edits)
     }
 
     return (
@@ -149,9 +155,14 @@ export function SlotManager({token}: SlotManagerProps) {
                         })}
                     </TabsList>
                 </Tabs>
-                <span className="text-sm text-muted-foreground">
-                    {openCount} open slots
-                </span>
+                <div className="flex items-center gap-3">
+                    {hostSlots.isFetching && (
+                        <span className="text-xs text-muted-foreground animate-pulse">Syncing...</span>
+                    )}
+                    <span className="text-sm text-muted-foreground">
+                        {openCount} open slots
+                    </span>
+                </div>
             </div>
 
             <div className="flex gap-2 overflow-x-auto pb-1">
@@ -189,45 +200,101 @@ export function SlotManager({token}: SlotManagerProps) {
                     <h3 className="text-lg font-semibold mb-3">
                         {formatDate(selectedDay)}
                     </h3>
-                    <div className="space-y-4">
-                        {TIME_BAND_ORDER.map((band) => {
-                            const bandSlots = slotsByBand.get(band) ?? []
-                            if (bandSlots.length === 0) return null
-                            return (
-                                <div key={band}>
-                                    <h4 className="text-sm font-medium text-muted-foreground mb-2 uppercase tracking-wide">
-                                        {timeBandLabel(band)}
-                                    </h4>
-                                    <div className="flex flex-wrap gap-1.5">
-                                        {bandSlots.map((slot) => {
-                                            const isBooked = slot.state === 'booked'
-                                            const isAvailable = slot.state === 'available'
-                                            return (
-                                                <Button
-                                                    key={slot.start}
-                                                    variant="outline"
-                                                    size="sm"
-                                                    disabled={isBooked || editAvailability.isPending}
-                                                    className={`
-                                                        h-8 min-w-[70px] text-xs
-                                                        ${isBooked
-                                                        ? 'bg-destructive/10 border-destructive/30 text-destructive cursor-not-allowed'
-                                                        : isAvailable
-                                                            ? 'bg-primary/10 border-primary/30 text-primary hover:bg-primary/20'
-                                                            : 'bg-muted border-muted text-muted-foreground hover:bg-muted/80'
-                                                    }
-                                                    `}
-                                                    onClick={() => toggleSlot(slot)}
-                                                >
-                                                    {formatTime(new Date(slot.start))}
-                                                </Button>
-                                            )
-                                        })}
-                                    </div>
-                                </div>
-                            )
-                        })}
-                    </div>
+
+                    {hostSlots.isLoading && (
+                        <p className="text-muted-foreground text-sm">Loading slots...</p>
+                    )}
+
+                    {!hostSlots.isLoading && hourRows.length === 0 && (
+                        <p className="text-muted-foreground text-sm">No slots found.</p>
+                    )}
+
+                    {!hostSlots.isLoading && hourRows.length > 0 && (
+                        <>
+                            <div className="space-y-0">
+                                {TIME_BAND_ORDER.map(band => {
+                                    const bandRows = hourRows.filter(r => r.band === band)
+                                    if (bandRows.length === 0) return null
+                                    return (
+                                        <div key={band}>
+                                            <div className="flex items-center gap-2 py-2 border-b border-border/40">
+                                                <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                                                    {timeBandLabel(band)}
+                                                </h4>
+                                                <div className="flex gap-2 ml-auto">
+                                                    <button
+                                                        type="button"
+                                                        className="text-[11px] text-green-600 hover:text-green-700 font-medium"
+                                                        onClick={() => toggleBand(band, 'available')}
+                                                        disabled={editAvailability.isPending}
+                                                    >
+                                                        Open all
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        className="text-[11px] text-muted-foreground hover:text-foreground font-medium"
+                                                        onClick={() => toggleBand(band, 'unavailable')}
+                                                        disabled={editAvailability.isPending}
+                                                    >
+                                                        Close all
+                                                    </button>
+                                                </div>
+                                            </div>
+                                            <div className="py-1">
+                                                {bandRows.map(({hour, slots}) => (
+                                                    <div
+                                                        key={hour}
+                                                        className="grid grid-cols-[44px_repeat(4,1fr)] gap-0.5 py-0.5 items-center hover:bg-muted/20 rounded-sm"
+                                                    >
+                                                        <div className="text-[11px] text-muted-foreground tabular-nums text-right pr-2">
+                                                            {String(hour).padStart(2, '0')}:00
+                                                        </div>
+                                                        {slots.map(slot => {
+                                                            const isBooked = slot.state === 'booked'
+                                                            const isAvailable = slot.state === 'available'
+                                                            return (
+                                                                <button
+                                                                    key={slot.start}
+                                                                    type="button"
+                                                                    disabled={isBooked || editAvailability.isPending}
+                                                                    title={`${formatTime(new Date(slot.start))} — ${slot.state}`}
+                                                                    onClick={() => toggleSlot(slot)}
+                                                                    className={`
+                                                                        h-6 rounded-sm border transition-colors
+                                                                        ${isBooked
+                                                                            ? 'bg-destructive/20 border-destructive/40 cursor-not-allowed'
+                                                                            : isAvailable
+                                                                                ? 'bg-green-400/70 border-green-500/50 hover:bg-green-400 cursor-pointer'
+                                                                                : 'bg-muted/40 border-muted-foreground/15 hover:bg-muted-foreground/10 cursor-pointer'
+                                                                        }
+                                                                    `}
+                                                                />
+                                                            )
+                                                        })}
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )
+                                })}
+                            </div>
+
+                            <div className="flex gap-4 mt-4 pt-3 border-t border-border/40 text-xs text-muted-foreground">
+                                <span className="flex items-center gap-1.5">
+                                    <span className="w-3 h-3 rounded-sm bg-green-400/70 border border-green-500/50 inline-block" />
+                                    Available
+                                </span>
+                                <span className="flex items-center gap-1.5">
+                                    <span className="w-3 h-3 rounded-sm bg-muted/40 border border-muted-foreground/15 inline-block" />
+                                    Unavailable
+                                </span>
+                                <span className="flex items-center gap-1.5">
+                                    <span className="w-3 h-3 rounded-sm bg-destructive/20 border border-destructive/40 inline-block" />
+                                    Booked
+                                </span>
+                            </div>
+                        </>
+                    )}
                 </div>
             )}
         </div>
